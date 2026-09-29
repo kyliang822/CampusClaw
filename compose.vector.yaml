@@ -1,0 +1,15 @@
+# Optional standalone Qdrant; no host port is published for the vector database.
+services:
+  campusclaw:
+    environment:
+      CAMPUS_VECTOR_MODE: remote
+      QDRANT_URL: http://qdrant:6333
+    depends_on:
+      - qdrant
+  qdrant:
+    image: qdrant/qdrant:latest
+    volumes:
+      - qdrant-data:/qdrant/storage
+    restart: unless-stopped
+volumes:
+  qdrant-data:
