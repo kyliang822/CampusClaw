@@ -9,6 +9,8 @@ import signal
 import sqlite3
 import time
 import retrieval
+import qa
+import platform_runtime
 from datetime import datetime
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -62,6 +64,8 @@ def init_db():
                     (name,display,role,class_id,salt,password_hash(pwd,salt)))
 
     retrieval.migrate(connect)
+    qa.migrate(connect)
+    platform_runtime.migrate(connect)
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -93,8 +97,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def session(self):
         try:
-            cookie=SimpleCookie(self.headers.get('Cookie',''))
-            token=cookie['campus_session'].value
+            scheme,token=self.headers.get('Authorization','').split(' ',1)
+            if scheme.lower()!='bearer' or not token or ' ' in token: return None
         except Exception:
             return None
         digest=hashlib.sha256(token.encode()).hexdigest()
@@ -107,7 +111,7 @@ class Handler(BaseHTTPRequestHandler):
     def require_user(self, write=False):
         user=self.session()
         if not user:
-            self.reply(401, {'error':'请先登录后再访问。'})
+            self.reply(401, {'error':'请先登录后再访问。'}, {'WWW-Authenticate':'Bearer'})
             return None
         if write and not hmac.compare_digest(self.headers.get('X-CSRF-Token',''),user['csrf']):
             self.reply(403, {'error':'请求校验失败，请刷新页面后重试。'})
@@ -131,15 +135,19 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         url=urlsplit(self.path)
         path=url.path
-        if path in ('/','/login','/materials','/knowledge'):
+        if path in ('/','/login','/materials','/knowledge','/chat'):
             return self.raw(200,(ROOT/'web/index.html').read_bytes(),'text/html; charset=utf-8')
-        assets={'/retrieval-ui.js':'text/javascript; charset=utf-8','/app.css':'text/css; charset=utf-8','/app.js':'text/javascript; charset=utf-8','/marked.js':'text/javascript; charset=utf-8','/favicon.svg':'image/svg+xml'}
+        assets={'/platform-ui.js':'text/javascript; charset=utf-8','/chat-ui.js':'text/javascript; charset=utf-8','/retrieval-ui.js':'text/javascript; charset=utf-8','/app.css':'text/css; charset=utf-8','/app.js':'text/javascript; charset=utf-8','/marked.js':'text/javascript; charset=utf-8','/favicon.svg':'image/svg+xml'}
         if path in assets:
             return self.raw(200,(ROOT/'web'/path[1:]).read_bytes(),assets[path])
         if not path.startswith('/api/'):
             return self.reply(404,{'error':'页面不存在。'})
         user=self.require_user()
         if not user: return
+        if path=='/api/platform' or path.startswith('/api/traces/'):
+            return platform_runtime.get(self,connect,user,path)
+        if path=='/api/ai/settings' or path=='/api/conversations' or path.startswith('/api/conversations/'):
+            return qa.get(self,connect,user,path,parse_qs(url.query),VECTOR_INDEX)
         if path=='/api/me':
             return self.reply(200,{k:v for k,v in user.items() if k!='token_hash'})
         if path=='/api/retrieval/status':
@@ -216,9 +224,15 @@ class Handler(BaseHTTPRequestHandler):
                 if previous: c.execute('DELETE FROM sessions WHERE token_hash=?',(previous['token_hash'],))
                 token=secrets.token_urlsafe(32); csrf=secrets.token_urlsafe(32)
                 c.execute('INSERT INTO sessions VALUES(?,?,?,?)',(hashlib.sha256(token.encode()).hexdigest(),user['id'],csrf,now+TTL))
-            return self.reply(200,{'ok':True},{'Set-Cookie':self.cookie(token)})
+            return self.reply(200,{'ok':True,'access_token':token,'token_type':'Bearer','expires_in':TTL},{'Set-Cookie':self.cookie('',0)})
         user=self.require_user(write=True)
         if not user: return
+        if path in ('/api/platform/skills','/api/platform/templates','/api/platform/apps'):
+            data=self.read_json(100000)
+            if data is not None:return platform_runtime.save_asset(self,connect,user,path,data)
+            return
+        if path in ('/api/ai/settings','/api/chat'):
+            return qa.post(self,connect,user,path,VECTOR_INDEX)
         if path=='/api/retrieval/retry':
             if user['role']!='teacher':return self.reply(403,{'error':'只有教师可以重试索引。'})
             VECTOR_INDEX.retry()

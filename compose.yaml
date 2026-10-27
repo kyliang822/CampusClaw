@@ -1,6 +1,7 @@
 services:
   campusclaw:
     build: .
+    env_file: .env
     ports:
       - "127.0.0.1:8765:8765"
     volumes:
